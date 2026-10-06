@@ -1,4 +1,6 @@
 const router = require('express').Router();
+const requireRole = require('../middleware/requireRole');
+router.use(requireRole('lecturer'));
 const bcrypt = require('bcrypt');
 const { pool, STUDENT_COLS } = require('../db');
 

@@ -17,3 +17,6 @@ const port = process.env.PORT || 3000;
 pool.query('SELECT 1')
   .then(() => app.listen(port, () => console.log(`Server running on port ${port}`)))
   .catch((err) => { console.error('Database connection failed:', err.message); process.exit(1); });
+
+  app.get('/api/me', requireAuth, (req, res) =>
+  res.json({ id: req.user.id, email: req.user.email, role: req.user.role, studentId: req.user.studentId }));

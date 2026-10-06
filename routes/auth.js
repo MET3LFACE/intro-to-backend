@@ -33,7 +33,7 @@ router.post('/login', async (req, res) => {
     const { email, password } = req.body;
     const [rows] = await pool.query('SELECT * FROM users WHERE email = ?', [String(email).toLowerCase()]);
     const user = rows[0];
-    const ok = user && (await bcrypt.compare(String(password), user.password_hash));
+    const ok = user && !user.disabled && (await bcrypt.compare(String(password), user.password_hash));
     if (!ok) return res.status(401).json({ error: 'Invalid email or password.' });
 
     const token = jwt.sign({ sub: user.id, email: user.email }, process.env.JWT_SECRET, { expiresIn: '1h' });
