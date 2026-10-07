@@ -154,13 +154,26 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-// DELETE (soft)
 router.delete('/:id', async (req, res) => {
-  const [result] = await pool.query(
-    'UPDATE studentREG SET deleted = 1, student_group = NULL, updated_at = ? WHERE student_id = ? AND deleted = 0',
-    [new Date(), req.params.id]
-  );
-  result.affectedRows ? res.status(204).end() : res.status(404).json({ error: 'Student not found.' });
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [result] = await conn.query(
+      'UPDATE studentREG SET deleted = 1, student_group = NULL, updated_at = ? WHERE student_id = ? AND deleted = 0',
+      [new Date(), req.params.id]);
+    if (!result.affectedRows) {
+      await conn.rollback();
+      return res.status(404).json({ error: 'Student not found.' });
+    }
+    await conn.query('UPDATE users SET disabled = 1 WHERE student_id = ?', [req.params.id]);
+    await conn.commit();
+    res.status(204).end();
+  } catch (err) {
+    await conn.rollback();
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong.' });
+  } finally {
+    conn.release();
+  }
 });
-
 module.exports = router;
