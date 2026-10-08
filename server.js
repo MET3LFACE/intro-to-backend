@@ -20,3 +20,4 @@ pool.query('SELECT 1')
 
   app.get('/api/me', requireAuth, (req, res) =>
   res.json({ id: req.user.id, email: req.user.email, role: req.user.role, studentId: req.user.studentId }));
+  app.use('/api/requests', requireAuth, require('./routes/requests'));
