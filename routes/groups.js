@@ -1,24 +1,8 @@
-const requireRole = require('../middleware/requireRole');
 const router = require('express').Router();
 const { pool } = require('../db');
+const requireRole = require('../middleware/requireRole');
 
-router.post('/', async (req, res) => {
-  try {
-    const { name, capacity = 5 } = req.body;
-    if (!name) return res.status(400).json({ error: 'name is required.' });
-    if (!Number.isInteger(Number(capacity)) || Number(capacity) < 1)
-      return res.status(400).json({ error: 'capacity must be a whole number of at least 1.' });
-
-    const [result] = await pool.query(
-      'INSERT INTO student_groups (group_name, capacity) VALUES (?, ?)', [name, Number(capacity)]);
-    res.status(201).json({ id: result.insertId, name, capacity: Number(capacity) });
-  } catch (err) {
-    if (err.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'Group name already exists.' });
-    console.error(err);
-    res.status(500).json({ error: 'Something went wrong.' });
-  }
-});
-
+// Any logged-in user may view groups and counts
 router.get('/', async (req, res) => {
   try {
     const [rows] = await pool.query(
@@ -35,6 +19,26 @@ router.get('/', async (req, res) => {
   }
 });
 
+// Everything below is lecturer-only
+router.use(requireRole('lecturer'));
+
+router.post('/', async (req, res) => {
+  try {
+    const { name, capacity = 5 } = req.body;
+    if (!name) return res.status(400).json({ error: 'name is required.' });
+    if (!Number.isInteger(Number(capacity)) || Number(capacity) < 1 || Number(capacity) > 15)
+      return res.status(400).json({ error: 'capacity must be a whole number from 1 to 15.' });
+
+    const [result] = await pool.query(
+      'INSERT INTO student_groups (group_name, capacity) VALUES (?, ?)', [name, Number(capacity)]);
+    res.status(201).json({ id: result.insertId, name, capacity: Number(capacity) });
+  } catch (err) {
+    if (err.code === 'ER_DUP_ENTRY') return res.status(409).json({ error: 'Group name already exists.' });
+    console.error(err);
+    res.status(500).json({ error: 'Something went wrong.' });
+  }
+});
+
 // Assign: POST /api/groups/:id/assign  { "studentIds": [1, 2] }
 router.post('/:id/assign', async (req, res) => {
   const ids = Array.isArray(req.body.studentIds)
@@ -46,19 +50,21 @@ router.post('/:id/assign', async (req, res) => {
   try {
     await conn.beginTransaction();
 
+    // Lock the group first, then the students, so every path locks in the same order
     const [[group]] = await conn.query('SELECT * FROM student_groups WHERE group_id = ? FOR UPDATE', [req.params.id]);
     if (!group) { await conn.rollback(); return res.status(404).json({ error: 'Group not found.' }); }
 
     const [students] = await conn.query(
-      'SELECT student_id, student_group FROM studentREG WHERE student_id IN (?) AND deleted = 0', [ids]);
+      'SELECT student_id, student_group FROM studentREG WHERE student_id IN (?) AND deleted = 0 ORDER BY student_id FOR UPDATE', [ids]);
     if (students.length !== ids.length) { await conn.rollback(); return res.status(404).json({ error: 'One or more students not found.' }); }
 
     const [[{ current }]] = await conn.query(
       'SELECT COUNT(*) AS current FROM studentREG WHERE student_group = ? AND deleted = 0', [group.group_id]);
     const newcomers = students.filter((s) => s.student_group !== group.group_id).length;
-    if (current + newcomers > group.capacity) { await conn.rollback(); return res.status(400).json({ error: 'Group capacity exceeded.' }); }
+    if (current + newcomers > group.capacity) { await conn.rollback(); return res.status(409).json({ error: 'GROUP_FULL' }); }
 
-    await conn.query('UPDATE studentREG SET student_group = ?, updated_at = ? WHERE student_id IN (?)',
+    await conn.query(
+      'UPDATE studentREG SET student_group = ?, version = version + 1, updated_at = ? WHERE student_id IN (?)',
       [group.group_id, new Date(), ids]);
     await conn.commit();
     res.json({ assigned: ids.length });
@@ -75,7 +81,7 @@ router.post('/:id/assign', async (req, res) => {
 router.post('/unassign/:studentId', async (req, res) => {
   try {
     const [result] = await pool.query(
-      'UPDATE studentREG SET student_group = NULL, updated_at = ? WHERE student_id = ? AND deleted = 0',
+      'UPDATE studentREG SET student_group = NULL, version = version + 1, updated_at = ? WHERE student_id = ? AND deleted = 0',
       [new Date(), req.params.studentId]
     );
     result.affectedRows ? res.json({ message: 'Unassigned.' }) : res.status(404).json({ error: 'Student not found.' });
@@ -90,7 +96,7 @@ router.post('/auto-assign', async (req, res) => {
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
-    await conn.query('SELECT group_id FROM student_groups FOR UPDATE');
+    await conn.query('SELECT group_id FROM student_groups ORDER BY group_id FOR UPDATE');
     const [groups] = await conn.query(
       `SELECT g.group_id, g.capacity, COUNT(s.student_id) AS members
        FROM student_groups g
@@ -104,7 +110,8 @@ router.post('/auto-assign', async (req, res) => {
     for (const g of groups) {
       let free = g.capacity - g.members;
       while (free > 0 && i < unassigned.length) {
-        await conn.query('UPDATE studentREG SET student_group = ?, updated_at = ? WHERE student_id = ?',
+        await conn.query(
+          'UPDATE studentREG SET student_group = ?, version = version + 1, updated_at = ? WHERE student_id = ?',
           [g.group_id, new Date(), unassigned[i].student_id]);
         i++; free--; assigned++;
       }
